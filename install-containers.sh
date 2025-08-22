@@ -137,6 +137,16 @@ get_base_ip() {
   echo "$MASTER_URL" | grep -oP '(?<=http://)([0-9]{1,3}\.){3}[0-9]+' | cut -d. -f1-3
 }
 
+ensure_network_exists() {
+  if ! docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
+    echo "[+] Network $NETWORK_NAME not found, creating..."
+    create_macvlan_network
+  else
+    echo "[+] Network $NETWORK_NAME already exists"
+  fi
+}
+
+
 create_macvlan_network() {
   local subnet=$(get_subnet)
   local gateway=$(get_gateway)
@@ -447,11 +457,12 @@ case "$1" in
     read -p "How many slave containers to create? " SLAVE_COUNT
     system_log "[+] Starting deployment of 1 master + $SLAVE_COUNT slave containers"
     system_log "[+] Security: Master will have port 80 access, slaves will be blocked"
-    
-    create_macvlan_network
-    
+
     stop_all
     remove_all
+
+    create_macvlan_network
+    ensure_network_exists
     
     deploy_master
     
