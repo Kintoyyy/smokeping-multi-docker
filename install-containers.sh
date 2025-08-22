@@ -9,17 +9,41 @@ set -e
 
 # --- CONFIG --- #
 NETWORK_NAME="smokeping_macvlan"
-PARENT_IFACE="ens18"
 IMAGE="lscr.io/linuxserver/smokeping:latest"
 CONFIG_BASE="/root/smokeping"
-MASTER_URL="http://10.15.0.100/smokeping/smokeping.cgi"
-SHARED_SECRET="Pa$4s5w0rd"
 TZ="Asia/Manila"
 CIDR_SUFFIX="24"
 MASTER_NAME="MAIN"
 SLAVE_BASE="ISP"
 START_OFFSET=101
 DEBUG=false
+
+# --- DETECT & ASK FOR INTERFACE --- #
+echo "Available physical interfaces:"
+ip -o link show | awk -F': ' '{print " - "$2}' | grep -v "lo"
+
+DOCKER_IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
+
+echo ""
+read -p "Enter the parent interface to use [default: ${DOCKER_IFACE}]: " USER_IFACE
+if [[ -z "$USER_IFACE" ]]; then
+  PARENT_IFACE="$DOCKER_IFACE"
+else
+  PARENT_IFACE="$USER_IFACE"
+fi
+
+echo "[+] Using parent interface: $PARENT_IFACE"
+
+# --- AUTO MASTER IP BASED ON SUBNET --- #
+SUBNET_BASE=$(ip -o -f inet addr show "$PARENT_IFACE" | awk '{print $4}' | cut -d/ -f1 | cut -d. -f1-3)
+MASTER_IP="${SUBNET_BASE}.100"
+MASTER_URL="http://${MASTER_IP}/smokeping/smokeping.cgi"
+
+echo "[+] Master URL automatically set to: $MASTER_URL"
+
+# --- RANDOMIZE SECRET --- #
+SHARED_SECRET=$(openssl rand -base64 16)
+echo "[+] Generated random shared secret: $SHARED_SECRET"
 
 # --- COLOR DEFINITIONS --- #
 declare -A COLORS=(
@@ -467,7 +491,7 @@ case "$1" in
       system_log "[+] Deployment completed successfully!"
       system_log "[+] Master available at: $MASTER_URL"
       system_log "[+] Slaves deployed without port 80 access for security"
-      system_log "[+] Use './smokeping.sh start --debug' to monitor container logs"
+      system_log "[+] Use './install-containers.sh start --debug' to monitor container logs"
     fi
     ;;
   stop)
