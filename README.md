@@ -3,6 +3,8 @@
 This script automates the deployment and management of **Smokeping** master and slave containers using Docker and MacVLAN networking.
 It supports **multi-slave deployments**, **colored log monitoring**, and **secure configuration handling**.
 
+![Diagram](/diagram.jpg)
+
 ---
 
 ## 📦 Features
