@@ -15,7 +15,7 @@ TZ="Asia/Manila"
 CIDR_SUFFIX="24"
 MASTER_NAME="MAIN"
 SLAVE_BASE="SLAVE"
-START_OFFSET=101
+MASTER_IP_OFFSET=200
 DEBUG=false
 
 # --- COLOR DEFINITIONS --- #
@@ -273,7 +273,7 @@ deploy_slaves() {
   local base_ip=$(get_base_ip)
 
   for i in $(seq 1 "$SLAVE_COUNT"); do
-    local ip="${base_ip}.$((100 + i))"   # master is .100, slaves start at .101
+    local ip="${base_ip}.$((MASTER_IP_OFFSET + i))"   # master is .200, slaves start at .201
     local cname="${SLAVE_NAMES[$((i-1))]}"
     local sconfig="$CONFIG_BASE/slaves/$cname"
 
@@ -473,34 +473,46 @@ trap cleanup_log_processes EXIT INT TERM
 # --- MAIN --- #
 case "$1" in
   start)
-    # Initialize log PID tracking file
-    > /tmp/smokeping_log_pids.tmp
-    # --- DETECT & ASK FOR INTERFACE --- #
-    echo "Available physical interfaces:"
-    ip -o link show | awk -F': ' '{print " - "$2}' | grep -v "lo"
+ # Initialize log PID tracking file
+  > /tmp/smokeping_log_pids.tmp
 
-    DOCKER_IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
+  echo "Available physical interfaces:"
+  ip -o link show | awk -F': ' '{print " - "$2}' | grep -v "lo"
 
-    echo ""
-    read -p "Enter the parent interface to use [default: ${DOCKER_IFACE}]: " USER_IFACE
-    if [[ -z "$USER_IFACE" ]]; then
-      PARENT_IFACE="$DOCKER_IFACE"
-    else
-      PARENT_IFACE="$USER_IFACE"
-    fi
+  DOCKER_IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
 
-    echo "[+] Using parent interface: $PARENT_IFACE"
+  echo ""
+  read -p "Enter the parent interface to use [default: ${DOCKER_IFACE}]: " USER_IFACE
+  if [[ -z "$USER_IFACE" ]]; then
+    PARENT_IFACE="$DOCKER_IFACE"
+  else
+    PARENT_IFACE="$USER_IFACE"
+  fi
 
-    # --- AUTO MASTER IP BASED ON SUBNET --- #
-    SUBNET_BASE=$(ip -o -f inet addr show "$PARENT_IFACE" | awk '{print $4}' | cut -d/ -f1 | cut -d. -f1-3)
-    MASTER_IP="${SUBNET_BASE}.100"
-    MASTER_URL="http://${MASTER_IP}/smokeping/smokeping.cgi"
+  # validate interface
+  if ! ip link show "$PARENT_IFACE" >/dev/null 2>&1; then
+    echo "[!] ERROR: Interface '$PARENT_IFACE' not found. Aborting."
+    exit 1
+  fi
 
-    echo "[+] Master URL automatically set to: $MASTER_URL"
+  echo "[+] Using parent interface: $PARENT_IFACE"
 
-    # --- RANDOMIZE SECRET --- #
-    SHARED_SECRET=$(openssl rand -base64 16)
-    echo "[+] Generated random shared secret: $SHARED_SECRET"
+  # --- ASK MASTER IP OFFSET --- #
+  read -p "Enter the last octet for Master IP [default: ${MASTER_IP_OFFSET}]: " USER_MASTER_IP
+  if [[ -n "$USER_MASTER_IP" ]]; then
+    MASTER_IP_OFFSET="$USER_MASTER_IP"
+  fi
+
+  # --- AUTO MASTER IP BASED ON SUBNET --- #
+  SUBNET_BASE=$(ip -o -f inet addr show "$PARENT_IFACE" | awk '{print $4}' | cut -d/ -f1 | cut -d. -f1-3)
+  MASTER_IP="${SUBNET_BASE}.${MASTER_IP_OFFSET}"
+  MASTER_URL="http://${MASTER_IP}/smokeping/smokeping.cgi"
+
+  echo "[+] Master URL automatically set to: $MASTER_URL"
+
+  # --- RANDOMIZE SECRET --- #
+  SHARED_SECRET=$(openssl rand -base64 16)
+  echo "[+] Generated random shared secret: $SHARED_SECRET"
 
     read -p "How many slave containers to create? " SLAVE_COUNT
     
