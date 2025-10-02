@@ -14,7 +14,7 @@ CONFIG_BASE="/root/smokeping"
 TZ="Asia/Manila"
 CIDR_SUFFIX="24"
 MASTER_NAME="MAIN"
-SLAVE_BASE="ISP"
+SLAVE_BASE="SLAVE"
 START_OFFSET=101
 DEBUG=false
 
@@ -68,27 +68,21 @@ declare -A COLORS=(
 # Color assignment for containers
 declare -A CONTAINER_COLORS=(
     ["MASTER"]="${COLORS[BRIGHT_GREEN]}"
-    ["SLAVE1"]="${COLORS[BRIGHT_BLUE]}"
-    ["SLAVE2"]="${COLORS[BRIGHT_MAGENTA]}"
-    ["SLAVE3"]="${COLORS[BRIGHT_CYAN]}"
-    ["SLAVE4"]="${COLORS[BRIGHT_YELLOW]}"
-    ["SLAVE5"]="${COLORS[BRIGHT_RED]}"
     ["MONITOR"]="${COLORS[GRAY]}"
     ["SYSTEM"]="${COLORS[WHITE]}"
 )
 
-# Fallback colors for additional slaves
 FALLBACK_COLORS=("${COLORS[RED]}" "${COLORS[GREEN]}" "${COLORS[YELLOW]}" "${COLORS[BLUE]}" "${COLORS[MAGENTA]}" "${COLORS[CYAN]}")
 
 # --- PARSE FLAGS --- #
-
 for arg in "$@"; do
   case "$arg" in
-    --debug|-debug)
-      DEBUG=true
-      ;;
+    --debug|-debug) DEBUG=true ;;
   esac
 done
+
+# Store slave names entered by user
+declare -a SLAVE_NAMES
 
 get_container_color() {
     local container_type="$1"
@@ -200,72 +194,46 @@ follow_container_logs() {
 
 deploy_master() {
   local master_ip=$(echo "$MASTER_URL" | grep -oP '(\d+\.\d+\.\d+\.\d+)' | head -1)
-  system_log "[+] Deploying Smokeping Master at $master_ip (with port 80 access)"
+  echo "[+] Deploying Smokeping Master at $master_ip"
 
   mkdir -p "$CONFIG_BASE/master/config" "$CONFIG_BASE/master/data"
 
-  system_log "[+] Writing slavesecrets.conf"
+  echo "[+] Writing slavesecrets.conf"
   : > "$CONFIG_BASE/master/config/slavesecrets.conf"
   for i in $(seq 1 "$SLAVE_COUNT"); do
-    echo "ISP${i}:${SHARED_SECRET}" >> "$CONFIG_BASE/master/config/slavesecrets.conf"
+    echo "${SLAVE_NAMES[$((i-1))]}:${SHARED_SECRET}" >> "$CONFIG_BASE/master/config/slavesecrets.conf"
   done
   chmod 600 "$CONFIG_BASE/master/config/slavesecrets.conf"
 
-  system_log "[+] Writing Slaves configuration file"
+  echo "[+] Writing Slaves configuration file"
   cat > "$CONFIG_BASE/master/config/Slaves" << EOF
 *** Slaves ***
 secrets=/config/slavesecrets.conf 
 EOF
 
-  # Define colors for each slave
   local colors=("00ff00" "ff0000" "0000ff" "ffff00" "ff00ff" "00ffff" "ffa500" "800080")
   
   for i in $(seq 1 "$SLAVE_COUNT"); do
+    local cname="${SLAVE_NAMES[$((i-1))]}"
     local color_index=$((i - 1))
     local color=${colors[$color_index % ${#colors[@]}]}
     cat >> "$CONFIG_BASE/master/config/Slaves" << EOF
 
-+ISP${i}
-display_name=ISP${i}
++${cname}
+display_name=${cname}
 color=${color}
 EOF
   done
 
-  system_log "[+] Updating Targets file with slaves configuration"
-  # Generate slaves list dynamically
-  local slaves_list=""
-  for i in $(seq 1 "$SLAVE_COUNT"); do
-    if [ $i -eq 1 ]; then
-      slaves_list="ISP${i}"
-    else
-      slaves_list="${slaves_list} ISP${i}"
-    fi
-  done
-
   TARGETS_FILE="$CONFIG_BASE/master/config/Targets"
-
   if [ -f "$TARGETS_FILE" ]; then
-    echo "[+] Setting slaves list in Targets file"
-
-    # Remove existing 'slaves = ...' line (if any)
+    slaves_list=$(IFS=" "; echo "${SLAVE_NAMES[*]}")
     sed -i '/^slaves *=/d' "$TARGETS_FILE"
-
-    # Insert/ensure slaves line after '*** Targets ***'
     awk -v slaves_line="slaves = ${slaves_list}" '
-      /^\*\*\* Targets \*\*\*/ {
-        print
-        print slaves_line
-        next
-      }
-      { print }
+      /^\*\*\* Targets \*\*\*/ { print; print slaves_line; next } { print }
     ' "$TARGETS_FILE" > "$TARGETS_FILE.tmp" && mv "$TARGETS_FILE.tmp" "$TARGETS_FILE"
-
-  else
-    system_log "[!] Targets file not found - cannot write slaves list"
   fi
 
-
-  system_log "[+] Writing apache2.conf to suppress FQDN warning"
   echo "ServerName $master_ip" > "$CONFIG_BASE/master/config/apache2.conf"
 
   docker run -d \
@@ -273,9 +241,6 @@ EOF
     --network="$NETWORK_NAME" \
     --ip="$master_ip" \
     --hostname="$MASTER_NAME" \
-    -e PUID=1000 \
-    -e PGID=1000 \
-    -e UMASK=022 \
     -e TZ="$TZ" \
     -v "$CONFIG_BASE/master/config:/config" \
     -v "$CONFIG_BASE/master/data:/data" \
@@ -294,33 +259,33 @@ deploy_slaves() {
   local base_ip=$(get_base_ip)
 
   for i in $(seq 1 "$SLAVE_COUNT"); do
-    local ip="${base_ip}.$((START_OFFSET + i - 1))"
-    local cname="${SLAVE_BASE}${i}"
+    local ip="${base_ip}.$((100 + i))"   # master is .100, slaves start at .101
+    local cname="${SLAVE_NAMES[$((i-1))]}"
     local sconfig="$CONFIG_BASE/slaves/$cname"
-    local slave_color=$(get_container_color "SLAVE" "$cname")
 
-    system_log "[+] Deploying Slave $i ($cname) at $ip (NO port 80 access)"
+    echo "[+] Preparing Slave $i ($cname) at $ip"
+
+    # Check if IP is already in use
+    existing_container=$(docker ps -a --format '{{.Names}} {{.Networks}}' \
+      --filter "network=$NETWORK_NAME" | grep "$ip" | awk '{print $1}')
+
+    if [[ -n "$existing_container" ]]; then
+      echo "[!] IP $ip already in use by container $existing_container — removing it..."
+      docker rm -f "$existing_container" >/dev/null 2>&1 || true
+    fi
 
     rm -rf "$sconfig"
     mkdir -p "$sconfig"
 
     echo "$SHARED_SECRET" > "$sconfig/secret.txt"
     chmod 600 "$sconfig/secret.txt"
-
     echo "ServerName $ip" > "$sconfig/apache2.conf"
 
-    # Chown to UID 1000 to match PUID inside the container
-    chown 1000:1000 "$sconfig/secret.txt"
-
-    # IMPORTANT: No port mapping (-p) for slaves - they should not be accessible externally
     docker run -d \
       --name="$cname" \
       --network="$NETWORK_NAME" \
       --ip="$ip" \
       --hostname="$cname" \
-      -e PUID=1000 \
-      -e PGID=1000 \
-      -e UMASK=022 \
       -e TZ="$TZ" \
       -e MASTER_URL="$MASTER_URL" \
       -e SHARED_SECRET="$SHARED_SECRET" \
@@ -330,13 +295,16 @@ deploy_slaves() {
       --restart unless-stopped \
       "$IMAGE"
 
-    colored_echo "$slave_color" "[+] Slave container '$cname' deployed successfully (port 80 blocked)"
-    
+echo "[+] Slave container '$cname' deployed successfully at $ip"
+
     if $DEBUG; then
       follow_container_logs "$cname" "SLAVE" "$ip"
     fi
+
+
   done
 }
+
 
 reload_all() {
   system_log "[+] Reloading smokeping configuration on all containers..."
@@ -445,6 +413,16 @@ show_color_legend() {
   echo ""
 }
 
+sanitize_name() {
+  local raw="$1"
+  local safe="${raw// /_}"
+  safe=$(echo "$safe" | sed 's/[^a-zA-Z0-9_.-]//g')
+  if [[ -z "$safe" ]]; then
+    safe="SLAVE$(date +%s)"
+  fi
+  echo "$safe"
+}
+
 # Trap to cleanup background processes on script exit
 trap cleanup_log_processes EXIT INT TERM
 
@@ -453,23 +431,24 @@ case "$1" in
   start)
     # Initialize log PID tracking file
     > /tmp/smokeping_log_pids.tmp
-    
     read -p "How many slave containers to create? " SLAVE_COUNT
-    system_log "[+] Starting deployment of 1 master + $SLAVE_COUNT slave containers"
-    system_log "[+] Security: Master will have port 80 access, slaves will be blocked"
-
+    
+    # Ask user for custom names
+    SLAVE_NAMES=()
+    for i in $(seq 1 "$SLAVE_COUNT"); do
+      read -p "Enter name for Slave $i: " sname
+      safe_name=$(sanitize_name "$sname")
+      echo "[*] Using sanitized name: $safe_name"
+      SLAVE_NAMES+=("$safe_name")
+    done
+    
+    echo "[+] Starting deployment of 1 master + $SLAVE_COUNT slaves"
     stop_all
     remove_all
-
     create_macvlan_network
     ensure_network_exists
-    
     deploy_master
-    
-    # Small delay to let master start
-    system_log "[+] Waiting 5 seconds for master to initialize..."
     sleep 5
-    
     deploy_slaves
     
     if $DEBUG; then
@@ -503,6 +482,7 @@ case "$1" in
       system_log "[+] Master available at: $MASTER_URL"
       system_log "[+] Slaves deployed without port 80 access for security"
       system_log "[+] Use './install-containers.sh start --debug' to monitor container logs"
+      docker ps
     fi
     ;;
   stop)
